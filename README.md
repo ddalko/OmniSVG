@@ -197,7 +197,106 @@ We provide an interactive generation interface using Gradio:
   <img src="assets/omnisvg-teaser.gif" alt="Demo GIF" height="256px" style="margin-right: 10px;" />
 </div>
 
+### OpenAI-Compatible API Server
 
+For integration with external systems that already speak the OpenAI Chat
+Completions API (e.g. clients written against `openai.OpenAI(...)` or vLLM-style
+servers), use `openai_server.py`. It wraps the same model loading and
+generation pipeline as `inference.py` and exposes:
+
+- `POST /v1/chat/completions`
+- `GET  /v1/models`
+- `GET  /health`
+
+#### Setup (clean machine)
+
+```bash
+git clone https://github.com/OmniSVG/OmniSVG.git
+cd OmniSVG
+
+# Cairo system library (required by CairoSVG) — see Section 3.3 above
+sudo apt install libcairo2 libcairo2-dev   # Linux
+# or:  brew install cairo                   # macOS
+
+# Python env (Python 3.10+ recommended; tested on 3.12)
+python3 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+The model weights are pulled from Hugging Face on first launch
+(`Qwen/Qwen2.5-VL-7B-Instruct` ≈ 16 GB + `OmniSVG/OmniSVG1.1_8B` ≈ 17 GB).
+If you have already downloaded them with `huggingface-cli`, the cache is
+reused.
+
+#### Run the server
+
+```bash
+python openai_server.py --host 127.0.0.1 --port 8000
+```
+
+The server binds to localhost only by default. The first start takes a few
+minutes (download + load); subsequent starts only load. Wait for the
+`Uvicorn running on ...` line in the log, or poll `GET /health`.
+
+#### Call from a client
+
+The exposed `model` id is `omnisvg-8b` (strict — other ids return 400).
+The endpoint accepts text-only chat messages or chat messages containing an
+`image_url` content part with a base64 `data:` URL.
+
+**curl (text-to-svg):**
+```bash
+curl -X POST http://127.0.0.1:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "omnisvg-8b",
+    "messages": [{"role": "user", "content": "a simple red heart icon"}],
+    "max_tokens": 1024,
+    "temperature": 0.5
+  }'
+```
+
+**Python (OpenAI SDK, image-to-svg):**
+```python
+import base64
+from openai import OpenAI
+
+client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="sk-anything")
+
+with open("examples/000.png", "rb") as f:
+    data_url = f"data:image/png;base64,{base64.b64encode(f.read()).decode()}"
+
+resp = client.chat.completions.create(
+    model="omnisvg-8b",
+    messages=[{"role": "user", "content": [
+        {"type": "image_url", "image_url": {"url": data_url}},
+        {"type": "text", "text": "Convert to SVG"},
+    ]}],
+    max_tokens=1024,
+    temperature=0.3,
+    top_p=0.9,
+)
+print(resp.choices[0].message.content)   # <svg>...</svg>
+```
+
+The OpenAI request fields `max_tokens`, `temperature`, `top_p`, and `n` map
+to the underlying generation parameters; `top_k` and `repetition_penalty`
+fall back to the per-task defaults in `config.yaml`.
+
+#### Known limitations
+
+- **No streaming.** SVG post-processing requires the full token sequence,
+  so `stream: true` is rejected with 400.
+- **Concurrency 1.** Generations are serialized by an `asyncio.Lock`
+  because concurrent runs on a single GPU risk OOM. For higher throughput,
+  add batched generation.
+- **GPU memory.** The 8B model uses ≈ 26 GB at runtime — make sure no other
+  large model is holding the GPU before starting.
+- **Image-to-SVG ignores the text part.** When a user message contains
+  both an `image_url` and `text`, only the image is used (matches
+  `inference.py`'s image path).
 
 ## 5. Evaluation
 
